@@ -1,0 +1,9 @@
+node_modules
+tests
+.git
+.eslintrc.json
+*.md
+passport-reports/
+sbom.cdx.json
+.env
+.env.*

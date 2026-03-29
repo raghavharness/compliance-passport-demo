@@ -1,17 +1,35 @@
 {
-  "name": "compliance-passport-demo",
-  "version": "1.0.0",
-  "description": "Demo app for Compliance Passport Agent - Harness Agent Dev Day 2026",
-  "main": "src/index.js",
+  "name": "payment-service",
+  "version": "2.1.0",
+  "description": "Payment processing microservice - Enterprise grade",
+  "main": "src/server.js",
   "scripts": {
-    "start": "node src/index.js",
-    "test": "node --test src/**/*.test.js",
-    "lint": "echo 'Linting passed'",
-    "security-scan": "echo 'Security scan completed - 0 critical, 0 high vulnerabilities found'"
+    "start": "node src/server.js",
+    "dev": "node --watch src/server.js",
+    "test": "node --test tests/**/*.test.js",
+    "test:coverage": "node --test --experimental-test-coverage tests/**/*.test.js",
+    "lint": "npx eslint src/ tests/",
+    "lint:fix": "npx eslint src/ tests/ --fix",
+    "security:audit": "npm audit --json",
+    "security:sast": "grep -rn 'password\\|api_key\\|secret_key\\|private_key\\|AWS_SECRET' src/ --include='*.js' || echo 'No secrets found'",
+    "sbom:generate": "npx @cyclonedx/cyclonedx-npm --output-file sbom.cdx.json --output-format JSON",
+    "docker:build": "docker build -t payment-service:latest .",
+    "docker:run": "docker run -p 3000:3000 payment-service:latest"
   },
-  "license": "MIT",
   "dependencies": {
-    "express": "^4.21.0"
+    "cors": "^2.8.5",
+    "express": "^4.21.0",
+    "express-rate-limit": "^7.1.5",
+    "helmet": "^7.1.0",
+    "joi": "^17.11.0",
+    "jsonwebtoken": "^9.0.2",
+    "uuid": "^9.0.0",
+    "winston": "^3.11.0"
   },
-  "devDependencies": {}
+  "devDependencies": {
+    "eslint": "^8.56.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
 }
