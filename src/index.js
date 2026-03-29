@@ -39,3 +39,4 @@ if (require.main === module) {
 }
 
 module.exports = app;
+// Health check endpoint added
