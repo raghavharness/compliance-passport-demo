@@ -7,6 +7,7 @@ const { errorHandler } = require('./middleware/errorHandler');
 const healthRoutes = require('./routes/health');
 const paymentRoutes = require('./routes/payments');
 const webhookRoutes = require('./routes/webhooks');
+const analyticsRoutes = require('./routes/analytics');
 const logger = require('./utils/logger');
 
 const app = express();
@@ -34,6 +35,7 @@ app.use((req, res, next) => {
 app.use('/health', healthRoutes);
 app.use('/api/v1/payments', paymentRoutes);
 app.use('/api/v1/webhooks', webhookRoutes);
+app.use('/api/v1/analytics', analyticsRoutes);
 
 app.use((req, res) => {
   res.status(404).json({ error: 'Not Found', path: req.path });
