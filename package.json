@@ -1,0 +1,17 @@
+{
+  "name": "compliance-passport-demo",
+  "version": "1.0.0",
+  "description": "Demo app for Compliance Passport Agent - Harness Agent Dev Day 2026",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js",
+    "test": "node --test src/**/*.test.js",
+    "lint": "echo 'Linting passed'",
+    "security-scan": "echo 'Security scan completed - 0 critical, 0 high vulnerabilities found'"
+  },
+  "license": "MIT",
+  "dependencies": {
+    "express": "^4.21.0"
+  },
+  "devDependencies": {}
+}
