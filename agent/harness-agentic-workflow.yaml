@@ -1,0 +1,63 @@
+# Compliance Passport Agent - Harness Agentic Workflow
+# This is the agent step definition that runs inside the CI pipeline
+# after all build/test/security steps have completed.
+#
+# The agent reads pipeline step logs, GitHub PR data, and codebase
+# to generate a compliance passport for every build.
+
+agents:
+  compliance-passport:
+    name: Compliance Passport Agent
+    description: >
+      Collects compliance evidence from pipeline execution logs, GitHub PRs,
+      and the cloned codebase. Validates against SOC 2, SLSA L3, and PCI DSS
+      frameworks. Generates a tamper-evident Compliance Passport report.
+
+    plugin:
+      name: claude-code-plugin
+      image: pkg.harness.io/vrvdt5ius7uwygso8s0bia/harness-agents/claude-code-plugin:main
+
+    mcp_servers:
+      - name: harness
+        description: Access pipeline execution data and step logs
+      - name: github
+        description: Access PR reviews, commits, and repository data
+
+    environment:
+      HARNESS_ACCOUNT_ID: <+account.identifier>
+      HARNESS_ORG_ID: <+org.identifier>
+      HARNESS_PROJECT_ID: <+project.identifier>
+      HARNESS_PIPELINE_ID: <+pipeline.identifier>
+      HARNESS_EXECUTION_ID: <+pipeline.executionId>
+      HARNESS_STAGE_EXECUTION_ID: <+stage.executionId>
+      HARNESS_BUILD_NUMBER: <+pipeline.sequenceId>
+      HARNESS_GIT_REPO: <+codebase.repoUrl>
+      HARNESS_GIT_COMMIT_SHA: <+codebase.commitSha>
+      HARNESS_GIT_BRANCH: <+codebase.branch>
+      HARNESS_PR_NUMBER: <+codebase.prNumber>
+      HARNESS_TRIGGER_TYPE: <+pipeline.triggerType>
+
+    task: |
+      You are the Compliance Passport Agent. Read the agent prompt at
+      ./agent/passport-agent-prompt.md and execute all 4 phases:
+
+      1. EVIDENCE COLLECTION: Use Harness MCP to read execution details and
+         step logs for execution $HARNESS_EXECUTION_ID. Use GitHub MCP to
+         read PR #$HARNESS_PR_NUMBER on repo $HARNESS_GIT_REPO.
+         Analyze the cloned codebase in the working directory.
+
+      2. POLICY VALIDATION: Validate all collected evidence against
+         SOC 2 Type II, SLSA Level 3, and PCI DSS frameworks.
+
+      3. REPORT GENERATION: Generate the Compliance Passport as a markdown
+         file in ./passport-reports/ with the naming convention:
+         COMPLIANCE_PASSPORT_{execution_id}_{date}.md
+
+      4. PR INTEGRATION: Post a summary comment to PR #$HARNESS_PR_NUMBER
+         with the compliance status and key findings.
+
+      IMPORTANT: Parse evidence from STEP LOGS, not by running the checks
+      yourself. The pipeline already ran lint, tests, security scans etc.
+      Your job is to READ the results and generate the passport.
+
+    max_turns: 25
