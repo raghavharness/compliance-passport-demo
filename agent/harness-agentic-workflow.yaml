@@ -2,16 +2,20 @@
 # This is the agent step definition that runs inside the CI pipeline
 # after all build/test/security steps have completed.
 #
-# The agent reads pipeline step logs, GitHub PR data, and codebase
-# to generate a compliance passport for every build.
+# The agent reads pipeline step logs, GitHub PR data, Harness platform
+# state, and the cloned codebase to generate a compliance passport.
+#
+# Supports: SOC 2 Type II, PCI DSS v4.0, HIPAA, SLSA Level 3
+# Frameworks are user-configurable via COMPLIANCE_FRAMEWORKS env var.
 
 agents:
   compliance-passport:
     name: Compliance Passport Agent
     description: >
       Collects compliance evidence from pipeline execution logs, GitHub PRs,
-      and the cloned codebase. Validates against SOC 2, SLSA L3, and PCI DSS
-      frameworks. Generates a tamper-evident Compliance Passport report.
+      Harness platform state (RBAC, secrets, policies), and the cloned codebase.
+      Validates against user-specified compliance frameworks and generates a
+      tamper-evident Compliance Passport report.
 
     plugin:
       name: claude-code-plugin
@@ -19,11 +23,14 @@ agents:
 
     mcp_servers:
       - name: harness
-        description: Access pipeline execution data and step logs
+        description: >
+          Access pipeline execution data, step logs, RBAC role assignments,
+          secrets metadata, OPA policies, environments, and pipeline config
       - name: github
         description: Access PR reviews, commits, and repository data
 
     environment:
+      # Pipeline context
       HARNESS_ACCOUNT_ID: <+account.identifier>
       HARNESS_ORG_ID: <+org.identifier>
       HARNESS_PROJECT_ID: <+project.identifier>
@@ -31,33 +38,71 @@ agents:
       HARNESS_EXECUTION_ID: <+pipeline.executionId>
       HARNESS_STAGE_EXECUTION_ID: <+stage.executionId>
       HARNESS_BUILD_NUMBER: <+pipeline.sequenceId>
+      # Source context
       HARNESS_GIT_REPO: <+codebase.repoUrl>
       HARNESS_GIT_COMMIT_SHA: <+codebase.commitSha>
       HARNESS_GIT_BRANCH: <+codebase.branch>
       HARNESS_PR_NUMBER: <+codebase.prNumber>
       HARNESS_TRIGGER_TYPE: <+pipeline.triggerType>
+      # Compliance configuration - user sets this per pipeline
+      # Comma-separated: SOC2, PCI_DSS, HIPAA, SLSA
+      COMPLIANCE_FRAMEWORKS: <+pipeline.variables.compliance_frameworks>
 
     task: |
       You are the Compliance Passport Agent. Read the agent prompt at
-      ./agent/passport-agent-prompt.md and execute all 4 phases:
+      ./agent/passport-agent-prompt.md and execute all 4 phases.
 
-      1. EVIDENCE COLLECTION: Use Harness MCP to read execution details and
-         step logs for execution $HARNESS_EXECUTION_ID. Use GitHub MCP to
-         read PR #$HARNESS_PR_NUMBER on repo $HARNESS_GIT_REPO.
-         Analyze the cloned codebase in the working directory.
+      COMPLIANCE FRAMEWORKS TO EVALUATE: $COMPLIANCE_FRAMEWORKS
+      (Only evaluate the frameworks listed above. If empty, default to SOC2.)
 
-      2. POLICY VALIDATION: Validate all collected evidence against
-         SOC 2 Type II, SLSA Level 3, and PCI DSS frameworks.
+      ## Phase 1: EVIDENCE COLLECTION
 
-      3. REPORT GENERATION: Generate the Compliance Passport as a markdown
-         file in ./passport-reports/ with the naming convention:
-         COMPLIANCE_PASSPORT_{execution_id}_{date}.md
+      Collect evidence from ALL available sources:
 
-      4. PR INTEGRATION: Post a summary comment to PR #$HARNESS_PR_NUMBER
-         with the compliance status and key findings.
+      a) PIPELINE EXECUTION: Use Harness MCP to read execution details and
+         step logs for execution $HARNESS_EXECUTION_ID. Parse KEY=VALUE pairs
+         from each step's output.
 
-      IMPORTANT: Parse evidence from STEP LOGS, not by running the checks
-      yourself. The pipeline already ran lint, tests, security scans etc.
-      Your job is to READ the results and generate the passport.
+      b) PULL REQUEST: Use GitHub MCP to read PR #$HARNESS_PR_NUMBER on
+         repo $HARNESS_GIT_REPO. Get reviews, approval status, diff.
 
-    max_turns: 25
+      c) HARNESS PLATFORM GOVERNANCE: Use Harness MCP to check:
+         - Role assignments: harness_list(resource_type=role_assignment)
+         - Secrets: harness_list(resource_type=secret)
+         - Pipeline config: harness_get(resource_type=pipeline) to check for approval stages
+         - OPA policies: harness_list(resource_type=policy)
+         - Environments: harness_list(resource_type=environment)
+
+      d) CODEBASE: Analyze the cloned codebase in the working directory
+         for security practices, middleware, configs.
+
+      ## Phase 2: POLICY VALIDATION
+
+      For EACH framework in $COMPLIANCE_FRAMEWORKS, validate all controls
+      defined in the agent prompt. Mark each as PASS, FAIL, WARN, or N/A.
+
+      ## Phase 3: REPORT GENERATION
+
+      Generate the Compliance Passport as a markdown file in
+      ./passport-reports/ with naming:
+      COMPLIANCE_PASSPORT_{execution_id}_{date}.md
+
+      Include sections for ALL requested frameworks with per-control results.
+
+      ## Phase 4: PR INTEGRATION
+
+      Post a summary comment to PR #$HARNESS_PR_NUMBER with:
+      - Per-framework compliance status table
+      - Health score
+      - Critical violations with remediation steps
+      - Link to full report
+
+      IMPORTANT RULES:
+      - Parse evidence from STEP LOGS, not by running checks yourself
+      - The pipeline already ran lint, tests, security scans
+      - Your job is to READ results and VALIDATE against framework controls
+      - For Harness platform checks, use MCP tools to query live platform state
+      - Only report on frameworks listed in $COMPLIANCE_FRAMEWORKS
+      - Be specific with evidence citations (which step, which MCP call)
+
+    max_turns: 30

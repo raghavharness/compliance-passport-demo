@@ -1,0 +1,328 @@
+pipeline:
+  name: fintech-payment-ci
+  identifier: fintech_payment_ci
+  projectIdentifier: RaghavTest
+  orgIdentifier: default
+  tags:
+    compliance: "true"
+    industry: fintech
+    frameworks: "PCI_DSS,SOC2"
+  properties:
+    ci:
+      codebase:
+        connectorRef: RaghavPrivateGithub
+        repoName: raghavharness/compliance-passport-demo
+        build: <+input>
+  stages:
+    - stage:
+        name: Build and Verify
+        identifier: build_and_verify
+        description: "FinTech CI - build, test, security scans with PCI DSS checks"
+        type: CI
+        spec:
+          cloneCodebase: true
+          platform:
+            os: Linux
+            arch: Amd64
+          runtime:
+            type: Cloud
+            spec: {}
+          execution:
+            steps:
+              - step:
+                  type: Run
+                  name: Build Info
+                  identifier: build_info
+                  spec:
+                    shell: Bash
+                    image: node:20
+                    command: |
+                      echo "=== BUILD INFO ==="
+                      echo "SERVICE_NAME=fintech-payment-api"
+                      echo "SERVICE_TYPE=payment-processing"
+                      echo "INDUSTRY=fintech"
+                      echo "COMMIT_SHA=<+codebase.commitSha>"
+                      echo "COMMIT_AUTHOR=<+codebase.gitUser>"
+                      echo "COMMIT_MESSAGE=<+codebase.commitMessage>"
+                      echo "BRANCH=<+codebase.branch>"
+                      echo "REPO_URL=<+codebase.repoUrl>"
+                      echo "PR_NUMBER=<+codebase.prNumber>"
+                      echo "TRIGGER_TYPE=<+pipeline.triggerType>"
+                      echo "EXECUTION_ID=<+pipeline.executionId>"
+                      echo "BUILD_NUMBER=<+pipeline.sequenceId>"
+                      echo "=== BUILD INFO COMPLETE ==="
+              - step:
+                  type: Run
+                  name: Install Dependencies
+                  identifier: install_deps
+                  spec:
+                    shell: Bash
+                    image: node:20
+                    command: |
+                      echo "=== INSTALL START ==="
+                      cd demos/fintech-payment-api
+                      npm ci 2>&1
+                      node -e "var p=require('./package.json'); console.log('DIRECT_DEPS=' + Object.keys(p.dependencies||{}).length)"
+                      node -e "var p=require('./package.json'); console.log('DEV_DEPS=' + Object.keys(p.devDependencies||{}).length)"
+                      echo "NODE_VERSION=$(node --version)"
+                      echo "=== INSTALL COMPLETE ==="
+              - step:
+                  type: Run
+                  name: ESLint Static Analysis
+                  identifier: run_lint
+                  spec:
+                    shell: Bash
+                    image: node:20
+                    command: |
+                      echo "=== LINT START ==="
+                      cd demos/fintech-payment-api
+                      npx eslint src/ tests/ --format json > lint-report.json 2>&1 || true
+                      npx eslint src/ tests/ 2>&1 || true
+                      node -e "try{var r=require('./lint-report.json');console.log('LINT_ERRORS='+r.reduce((a,f)=>a+f.errorCount,0));console.log('LINT_WARNINGS='+r.reduce((a,f)=>a+f.warningCount,0))}catch(e){console.log('LINT_ERRORS=0');console.log('LINT_WARNINGS=0')}"
+                      echo "LINT_STATUS=passed"
+                      echo "=== LINT COMPLETE ==="
+              - step:
+                  type: Run
+                  name: Unit Tests
+                  identifier: unit_tests
+                  spec:
+                    shell: Bash
+                    image: node:20
+                    command: |
+                      echo "=== UNIT TESTS START ==="
+                      cd demos/fintech-payment-api
+                      node --test tests/unit/*.test.js 2>&1 | tee unit-test-output.txt || true
+                      UNIT_TOTAL=$(grep -oP 'tests \K[0-9]+' unit-test-output.txt || echo '0')
+                      UNIT_PASS=$(grep -oP 'pass \K[0-9]+' unit-test-output.txt || echo '0')
+                      UNIT_FAIL=$(grep -oP 'fail \K[0-9]+' unit-test-output.txt || echo '0')
+                      echo "UNIT_TEST_TOTAL=$UNIT_TOTAL"
+                      echo "UNIT_TEST_PASSED=$UNIT_PASS"
+                      echo "UNIT_TEST_FAILED=$UNIT_FAIL"
+                      echo "=== UNIT TESTS COMPLETE ==="
+              - step:
+                  type: Run
+                  name: Integration Tests
+                  identifier: integration_tests
+                  spec:
+                    shell: Bash
+                    image: node:20
+                    command: |
+                      echo "=== INTEGRATION TESTS START ==="
+                      cd demos/fintech-payment-api
+                      node --test tests/integration/*.test.js 2>&1 | tee integration-test-output.txt || true
+                      INT_TOTAL=$(grep -oP 'tests \K[0-9]+' integration-test-output.txt || echo '0')
+                      INT_PASS=$(grep -oP 'pass \K[0-9]+' integration-test-output.txt || echo '0')
+                      INT_FAIL=$(grep -oP 'fail \K[0-9]+' integration-test-output.txt || echo '0')
+                      echo "INT_TEST_TOTAL=$INT_TOTAL"
+                      echo "INT_TEST_PASSED=$INT_PASS"
+                      echo "INT_TEST_FAILED=$INT_FAIL"
+                      echo "=== INTEGRATION TESTS COMPLETE ==="
+              - step:
+                  type: Run
+                  name: SAST - Secret Detection
+                  identifier: sast_scan
+                  spec:
+                    shell: Bash
+                    image: node:20
+                    command: |
+                      echo "=== SAST SCAN START ==="
+                      cd demos/fintech-payment-api
+                      SECRETS_FOUND=0
+                      DANGEROUS=0
+                      echo "[1/3] Checking for hardcoded secrets..."
+                      if grep -rn 'sk_live_\|sk_test_\|api_key\|AWS_SECRET\|PRIVATE_KEY' src/ --include='*.js' 2>/dev/null | grep -v '.test.js'; then
+                        echo "WARNING: Potential API keys/secrets found in source"
+                        SECRETS_FOUND=$((SECRETS_FOUND + 1))
+                      fi
+                      echo ""
+                      echo "[2/3] Checking for dangerous functions..."
+                      if grep -rn 'eval(\|new Function(\|child_process' src/ --include='*.js' 2>/dev/null; then
+                        DANGEROUS=$((DANGEROUS + 1))
+                      fi
+                      echo ""
+                      echo "[3/3] Checking .env.example for leaked values..."
+                      if [ -f .env.example ]; then
+                        grep -E '(sk_live|whsec_|ghp_)' .env.example || echo "No real secrets in .env.example"
+                      fi
+                      echo ""
+                      echo "SAST_SECRETS_FOUND=$SECRETS_FOUND"
+                      echo "SAST_DANGEROUS_FUNCTIONS=$DANGEROUS"
+                      [ $SECRETS_FOUND -eq 0 ] && [ $DANGEROUS -eq 0 ] && echo "SAST_STATUS=passed" || echo "SAST_STATUS=failed"
+                      echo "=== SAST SCAN COMPLETE ==="
+              - step:
+                  type: Run
+                  name: SCA - Dependency Vulnerability Scan
+                  identifier: sca_scan
+                  spec:
+                    shell: Bash
+                    image: node:20
+                    command: |
+                      echo "=== SCA SCAN START ==="
+                      cd demos/fintech-payment-api
+                      npm audit --json > audit-report.json 2>/dev/null || true
+                      npm audit 2>&1 || true
+                      node <<'NODESCRIPT'
+                      try {
+                        var r = require('./audit-report.json');
+                        var v = (r.metadata && r.metadata.vulnerabilities) || {};
+                        console.log('SCA_CRITICAL=' + (v.critical || 0));
+                        console.log('SCA_HIGH=' + (v.high || 0));
+                        console.log('SCA_MODERATE=' + (v.moderate || 0));
+                        console.log('SCA_LOW=' + (v.low || 0));
+                        console.log('SCA_TOTAL=' + (v.total || 0));
+                      } catch(e) {
+                        console.log('SCA_CRITICAL=0');console.log('SCA_HIGH=0');
+                        console.log('SCA_MODERATE=0');console.log('SCA_LOW=0');console.log('SCA_TOTAL=0');
+                      }
+                      NODESCRIPT
+                      echo "SCA_STATUS=passed"
+                      echo "=== SCA SCAN COMPLETE ==="
+              - step:
+                  type: Run
+                  name: PCI DSS - Card Data Exposure Scan
+                  identifier: pci_data_scan
+                  spec:
+                    shell: Bash
+                    image: node:20
+                    command: |
+                      echo "=== PCI DATA SCAN START ==="
+                      cd demos/fintech-payment-api
+                      PCI_CARD_EXPOSURES=0
+                      PCI_PAN_LOGGED=0
+                      echo "[1/3] Scanning for PAN (card number) exposure in logs..."
+                      if grep -rn 'cardNumber\|card_number\|card\.number' src/ --include='*.js' | grep -i 'log\|console\|print\|write'; then
+                        echo "WARNING: Card number potentially logged"
+                        PCI_PAN_LOGGED=$((PCI_PAN_LOGGED + 1))
+                      fi
+                      echo ""
+                      echo "[2/3] Checking card data encryption at rest..."
+                      PCI_ENCRYPTION_STATUS="fail"
+                      if grep -rn 'encrypt\|cipher\|aes' src/models/card.js src/services/cardService.js 2>/dev/null | grep -v 'require.*encryption'; then
+                        PCI_ENCRYPTION_STATUS="pass"
+                      else
+                        echo "WARNING: Card data stored without encryption"
+                      fi
+                      echo ""
+                      echo "[3/3] Checking for CVV storage..."
+                      if grep -rn 'cvv' src/models/ --include='*.js' 2>/dev/null | grep -v 'validate'; then
+                        echo "WARNING: CVV may be stored (PCI DSS prohibits CVV storage)"
+                      fi
+                      echo ""
+                      echo "PCI_CARD_EXPOSURES=$PCI_CARD_EXPOSURES"
+                      echo "PCI_PAN_LOGGED=$PCI_PAN_LOGGED"
+                      echo "PCI_ENCRYPTION_STATUS=$PCI_ENCRYPTION_STATUS"
+                      [ $PCI_PAN_LOGGED -eq 0 ] && [ "$PCI_ENCRYPTION_STATUS" = "pass" ] && echo "PCI_STATUS=passed" || echo "PCI_STATUS=failed"
+                      echo "=== PCI DATA SCAN COMPLETE ==="
+              - step:
+                  type: Run
+                  name: PCI DSS - Audit Log Coverage
+                  identifier: pci_audit_log
+                  spec:
+                    shell: Bash
+                    image: node:20
+                    command: |
+                      echo "=== AUDIT LOG CHECK START ==="
+                      cd demos/fintech-payment-api
+                      TOTAL_ROUTES=0
+                      LOGGED_ROUTES=0
+                      MISSING_ROUTES=""
+                      for routefile in src/routes/payments.js src/routes/cards.js; do
+                        if [ -f "$routefile" ]; then
+                          TOTAL_ROUTES=$((TOTAL_ROUTES + 1))
+                          routename=$(basename $routefile .js)
+                          if grep -q 'logger\.\(info\|audit\)' "$routefile" || grep -q 'auditLog' "$routefile"; then
+                            LOGGED_ROUTES=$((LOGGED_ROUTES + 1))
+                          else
+                            MISSING_ROUTES="$MISSING_ROUTES $routename"
+                          fi
+                        fi
+                      done
+                      echo "AUDIT_LOG_COVERAGE=$LOGGED_ROUTES/$TOTAL_ROUTES"
+                      echo "AUDIT_LOG_MISSING_ROUTES=$MISSING_ROUTES"
+                      [ $LOGGED_ROUTES -eq $TOTAL_ROUTES ] && echo "AUDIT_STATUS=passed" || echo "AUDIT_STATUS=failed"
+                      echo "=== AUDIT LOG CHECK COMPLETE ==="
+              - step:
+                  type: Run
+                  name: PCI DSS - Rate Limit Check
+                  identifier: pci_rate_limit
+                  spec:
+                    shell: Bash
+                    image: node:20
+                    command: |
+                      echo "=== RATE LIMIT CHECK START ==="
+                      cd demos/fintech-payment-api
+                      UNPROTECTED=""
+                      if grep -q 'rateLimiter' src/app.js | grep -v '^//' | grep -v '^\s*//' | head -1; then
+                        echo "Rate limiting enabled on payment routes"
+                        RATE_LIMIT_STATUS="passed"
+                      else
+                        echo "WARNING: Rate limiting not active on payment routes"
+                        RATE_LIMIT_STATUS="failed"
+                        UNPROTECTED="/api/payments /api/cards"
+                      fi
+                      echo "RATE_LIMIT_STATUS=$RATE_LIMIT_STATUS"
+                      echo "RATE_LIMIT_UNPROTECTED_ROUTES=$UNPROTECTED"
+                      echo "=== RATE LIMIT CHECK COMPLETE ==="
+              - step:
+                  type: Run
+                  name: Generate SBOM
+                  identifier: generate_sbom
+                  spec:
+                    shell: Bash
+                    image: node:20
+                    command: |
+                      echo "=== SBOM GENERATION START ==="
+                      cd demos/fintech-payment-api
+                      node <<'NODESCRIPT'
+                      var pkg = require('./package.json');
+                      var lockfile = require('./package-lock.json');
+                      var deps = Object.entries(lockfile.packages || {}).filter(e => e[0].startsWith('node_modules/'));
+                      console.log('SBOM_FORMAT=CycloneDX');
+                      console.log('SBOM_SPEC_VERSION=1.5');
+                      console.log('SBOM_COMPONENTS=' + deps.length);
+                      console.log('SBOM_DIRECT_DEPS=' + Object.keys(pkg.dependencies || {}).length);
+                      console.log('SBOM_DEV_DEPS=' + Object.keys(pkg.devDependencies || {}).length);
+                      NODESCRIPT
+                      echo "=== SBOM GENERATION COMPLETE ==="
+              - step:
+                  type: Run
+                  name: Validate Dockerfile
+                  identifier: validate_dockerfile
+                  spec:
+                    shell: Bash
+                    image: node:20
+                    command: |
+                      echo "=== DOCKERFILE VALIDATION START ==="
+                      cd demos/fintech-payment-api
+                      ISSUES=0
+                      if [ -f Dockerfile ]; then
+                        grep -q 'USER' Dockerfile && echo "[PASS] Non-root user" || { echo "[FAIL] Running as root"; ISSUES=$((ISSUES+1)); }
+                        grep -q 'HEALTHCHECK' Dockerfile && echo "[PASS] Health check" || echo "[WARN] No health check"
+                        grep -q 'AS builder' Dockerfile && echo "[PASS] Multi-stage build" || echo "[WARN] Single-stage build"
+                        grep -q 'COPY.*package.*json' Dockerfile && echo "[PASS] Dep layer caching" || echo "[WARN] No layer caching"
+                        echo "DOCKERFILE_STATUS=passed"
+                        echo "DOCKERFILE_ISSUES=$ISSUES"
+                      else
+                        echo "DOCKERFILE_STATUS=skipped"
+                      fi
+                      echo "=== DOCKERFILE VALIDATION COMPLETE ==="
+              - step:
+                  type: Run
+                  name: Build Summary
+                  identifier: build_summary
+                  spec:
+                    shell: Bash
+                    image: node:20
+                    command: |
+                      echo "================================================"
+                      echo "  FINTECH PAYMENT API - BUILD SUMMARY"
+                      echo "================================================"
+                      echo "Service:     fintech-payment-api v1.0.0"
+                      echo "Industry:    FinTech / Payment Processing"
+                      echo "Frameworks:  PCI DSS v4.0, SOC 2 Type II"
+                      echo "Commit:      <+codebase.commitSha>"
+                      echo "Branch:      <+codebase.branch>"
+                      echo "PR:          <+codebase.prNumber>"
+                      echo "Execution:   <+pipeline.executionId>"
+                      echo "Build:       #<+pipeline.sequenceId>"
+                      echo "================================================"

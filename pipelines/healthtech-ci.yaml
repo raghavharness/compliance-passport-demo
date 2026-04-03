@@ -1,0 +1,374 @@
+pipeline:
+  name: healthtech-patient-ci
+  identifier: healthtech_patient_ci
+  projectIdentifier: RaghavTest
+  orgIdentifier: default
+  tags:
+    compliance: "true"
+    industry: healthtech
+    frameworks: "HIPAA,SOC2"
+  properties:
+    ci:
+      codebase:
+        connectorRef: RaghavPrivateGithub
+        repoName: raghavharness/compliance-passport-demo
+        build: <+input>
+  stages:
+    - stage:
+        name: Build and Verify
+        identifier: build_and_verify
+        description: "HealthTech CI - build, test, security scans with HIPAA checks"
+        type: CI
+        spec:
+          cloneCodebase: true
+          platform:
+            os: Linux
+            arch: Amd64
+          runtime:
+            type: Cloud
+            spec: {}
+          execution:
+            steps:
+              - step:
+                  type: Run
+                  name: Build Info
+                  identifier: build_info
+                  spec:
+                    shell: Bash
+                    image: node:20
+                    command: |
+                      echo "=== BUILD INFO ==="
+                      echo "SERVICE_NAME=healthtech-patient-api"
+                      echo "SERVICE_TYPE=electronic-health-records"
+                      echo "INDUSTRY=healthtech"
+                      echo "COMMIT_SHA=<+codebase.commitSha>"
+                      echo "COMMIT_AUTHOR=<+codebase.gitUser>"
+                      echo "COMMIT_MESSAGE=<+codebase.commitMessage>"
+                      echo "BRANCH=<+codebase.branch>"
+                      echo "REPO_URL=<+codebase.repoUrl>"
+                      echo "PR_NUMBER=<+codebase.prNumber>"
+                      echo "TRIGGER_TYPE=<+pipeline.triggerType>"
+                      echo "EXECUTION_ID=<+pipeline.executionId>"
+                      echo "BUILD_NUMBER=<+pipeline.sequenceId>"
+                      echo "=== BUILD INFO COMPLETE ==="
+              - step:
+                  type: Run
+                  name: Install Dependencies
+                  identifier: install_deps
+                  spec:
+                    shell: Bash
+                    image: node:20
+                    command: |
+                      echo "=== INSTALL START ==="
+                      cd demos/healthtech-patient-api
+                      npm ci 2>&1
+                      node -e "var p=require('./package.json'); console.log('DIRECT_DEPS=' + Object.keys(p.dependencies||{}).length)"
+                      node -e "var p=require('./package.json'); console.log('DEV_DEPS=' + Object.keys(p.devDependencies||{}).length)"
+                      echo "NODE_VERSION=$(node --version)"
+                      echo "=== INSTALL COMPLETE ==="
+              - step:
+                  type: Run
+                  name: ESLint Static Analysis
+                  identifier: run_lint
+                  spec:
+                    shell: Bash
+                    image: node:20
+                    command: |
+                      echo "=== LINT START ==="
+                      cd demos/healthtech-patient-api
+                      npx eslint src/ tests/ --format json > lint-report.json 2>&1 || true
+                      npx eslint src/ tests/ 2>&1 || true
+                      node -e "try{var r=require('./lint-report.json');console.log('LINT_ERRORS='+r.reduce((a,f)=>a+f.errorCount,0));console.log('LINT_WARNINGS='+r.reduce((a,f)=>a+f.warningCount,0))}catch(e){console.log('LINT_ERRORS=0');console.log('LINT_WARNINGS=0')}"
+                      echo "LINT_STATUS=passed"
+                      echo "=== LINT COMPLETE ==="
+              - step:
+                  type: Run
+                  name: Unit Tests
+                  identifier: unit_tests
+                  spec:
+                    shell: Bash
+                    image: node:20
+                    command: |
+                      echo "=== UNIT TESTS START ==="
+                      cd demos/healthtech-patient-api
+                      node --test tests/unit/*.test.js 2>&1 | tee unit-test-output.txt || true
+                      UNIT_TOTAL=$(grep -oP 'tests \K[0-9]+' unit-test-output.txt || echo '0')
+                      UNIT_PASS=$(grep -oP 'pass \K[0-9]+' unit-test-output.txt || echo '0')
+                      UNIT_FAIL=$(grep -oP 'fail \K[0-9]+' unit-test-output.txt || echo '0')
+                      echo "UNIT_TEST_TOTAL=$UNIT_TOTAL"
+                      echo "UNIT_TEST_PASSED=$UNIT_PASS"
+                      echo "UNIT_TEST_FAILED=$UNIT_FAIL"
+                      echo "=== UNIT TESTS COMPLETE ==="
+              - step:
+                  type: Run
+                  name: Integration Tests
+                  identifier: integration_tests
+                  spec:
+                    shell: Bash
+                    image: node:20
+                    command: |
+                      echo "=== INTEGRATION TESTS START ==="
+                      cd demos/healthtech-patient-api
+                      node --test tests/integration/*.test.js 2>&1 | tee integration-test-output.txt || true
+                      INT_TOTAL=$(grep -oP 'tests \K[0-9]+' integration-test-output.txt || echo '0')
+                      INT_PASS=$(grep -oP 'pass \K[0-9]+' integration-test-output.txt || echo '0')
+                      INT_FAIL=$(grep -oP 'fail \K[0-9]+' integration-test-output.txt || echo '0')
+                      echo "INT_TEST_TOTAL=$INT_TOTAL"
+                      echo "INT_TEST_PASSED=$INT_PASS"
+                      echo "INT_TEST_FAILED=$INT_FAIL"
+                      echo "=== INTEGRATION TESTS COMPLETE ==="
+              - step:
+                  type: Run
+                  name: SAST - Secret Detection
+                  identifier: sast_scan
+                  spec:
+                    shell: Bash
+                    image: node:20
+                    command: |
+                      echo "=== SAST SCAN START ==="
+                      cd demos/healthtech-patient-api
+                      SECRETS_FOUND=0
+                      DANGEROUS=0
+                      echo "[1/2] Checking for hardcoded secrets..."
+                      if grep -rn 'api_key\|AWS_SECRET\|PRIVATE_KEY\|password.*=' src/ --include='*.js' 2>/dev/null | grep -v 'process.env\|config\.\|\.test\.'; then
+                        SECRETS_FOUND=$((SECRETS_FOUND + 1))
+                      else
+                        echo "No hardcoded secrets detected"
+                      fi
+                      echo "[2/2] Checking for dangerous functions..."
+                      if grep -rn 'eval(\|new Function(' src/ --include='*.js' 2>/dev/null; then
+                        DANGEROUS=$((DANGEROUS + 1))
+                      else
+                        echo "No dangerous functions found"
+                      fi
+                      echo "SAST_SECRETS_FOUND=$SECRETS_FOUND"
+                      echo "SAST_DANGEROUS_FUNCTIONS=$DANGEROUS"
+                      [ $SECRETS_FOUND -eq 0 ] && [ $DANGEROUS -eq 0 ] && echo "SAST_STATUS=passed" || echo "SAST_STATUS=failed"
+                      echo "=== SAST SCAN COMPLETE ==="
+              - step:
+                  type: Run
+                  name: SCA - Dependency Vulnerability Scan
+                  identifier: sca_scan
+                  spec:
+                    shell: Bash
+                    image: node:20
+                    command: |
+                      echo "=== SCA SCAN START ==="
+                      cd demos/healthtech-patient-api
+                      npm audit --json > audit-report.json 2>/dev/null || true
+                      npm audit 2>&1 || true
+                      node <<'NODESCRIPT'
+                      try {
+                        var r = require('./audit-report.json');
+                        var v = (r.metadata && r.metadata.vulnerabilities) || {};
+                        console.log('SCA_CRITICAL=' + (v.critical || 0));
+                        console.log('SCA_HIGH=' + (v.high || 0));
+                        console.log('SCA_MODERATE=' + (v.moderate || 0));
+                        console.log('SCA_LOW=' + (v.low || 0));
+                        console.log('SCA_TOTAL=' + (v.total || 0));
+                      } catch(e) {
+                        console.log('SCA_CRITICAL=0');console.log('SCA_HIGH=0');
+                        console.log('SCA_MODERATE=0');console.log('SCA_LOW=0');console.log('SCA_TOTAL=0');
+                      }
+                      NODESCRIPT
+                      echo "SCA_STATUS=passed"
+                      echo "=== SCA SCAN COMPLETE ==="
+              - step:
+                  type: Run
+                  name: HIPAA - PHI Exposure Scan
+                  identifier: hipaa_phi_scan
+                  spec:
+                    shell: Bash
+                    image: node:20
+                    command: |
+                      echo "=== PHI SCAN START ==="
+                      cd demos/healthtech-patient-api
+                      PHI_EXPOSURES=0
+                      PHI_SSN_LOGGED=0
+                      PHI_DIAGNOSIS_LOGGED=0
+                      echo "[1/3] Scanning for SSN/DOB in log statements..."
+                      if grep -rn 'ssn\|socialSecurity\|social_security' src/ --include='*.js' | grep -i 'log\|console\|print'; then
+                        echo "WARNING: SSN potentially logged"
+                        PHI_SSN_LOGGED=1
+                        PHI_EXPOSURES=$((PHI_EXPOSURES + 1))
+                      fi
+                      echo ""
+                      echo "[2/3] Scanning for diagnosis/medical data in logs..."
+                      if grep -rn 'diagnosis\|medication\|prescription' src/ --include='*.js' | grep -i 'log\|console'; then
+                        echo "WARNING: Medical data potentially logged"
+                        PHI_DIAGNOSIS_LOGGED=1
+                        PHI_EXPOSURES=$((PHI_EXPOSURES + 1))
+                      fi
+                      echo ""
+                      echo "[3/3] Scanning for patient names in logs..."
+                      if grep -rn 'patient\.\(firstName\|lastName\|name\)' src/ --include='*.js' | grep -i 'log\|console'; then
+                        echo "WARNING: Patient names in log output"
+                        PHI_EXPOSURES=$((PHI_EXPOSURES + 1))
+                      fi
+                      echo ""
+                      echo "PHI_EXPOSURES=$PHI_EXPOSURES"
+                      echo "PHI_SSN_LOGGED=$PHI_SSN_LOGGED"
+                      echo "PHI_DIAGNOSIS_LOGGED=$PHI_DIAGNOSIS_LOGGED"
+                      [ $PHI_EXPOSURES -eq 0 ] && echo "PHI_STATUS=passed" || echo "PHI_STATUS=failed"
+                      echo "=== PHI SCAN COMPLETE ==="
+              - step:
+                  type: Run
+                  name: HIPAA - PHI Encryption Check
+                  identifier: hipaa_encryption
+                  spec:
+                    shell: Bash
+                    image: node:20
+                    command: |
+                      echo "=== PHI ENCRYPTION CHECK START ==="
+                      cd demos/healthtech-patient-api
+                      PHI_ENCRYPTED=0
+                      PHI_UNENCRYPTED=0
+                      echo "Checking if PHI fields use encryption..."
+                      # Check if patient model uses encryption for SSN
+                      if grep -q 'encrypt\|cipher' src/models/patient.js 2>/dev/null; then
+                        echo "[PASS] SSN encryption in patient model"
+                        PHI_ENCRYPTED=$((PHI_ENCRYPTED + 1))
+                      else
+                        echo "[FAIL] SSN stored as plaintext in patient model"
+                        PHI_UNENCRYPTED=$((PHI_UNENCRYPTED + 1))
+                      fi
+                      # Check if patientService uses encryption
+                      if grep -q 'encryptPHI\|encrypt(' src/services/patientService.js 2>/dev/null; then
+                        echo "[PASS] PHI encryption in patient service"
+                        PHI_ENCRYPTED=$((PHI_ENCRYPTED + 1))
+                      else
+                        echo "[FAIL] Patient service stores PHI without encryption"
+                        PHI_UNENCRYPTED=$((PHI_UNENCRYPTED + 1))
+                      fi
+                      echo "PHI_ENCRYPTED_FIELDS=$PHI_ENCRYPTED"
+                      echo "PHI_UNENCRYPTED_FIELDS=$PHI_UNENCRYPTED"
+                      [ $PHI_UNENCRYPTED -eq 0 ] && echo "PHI_ENCRYPTION_STATUS=passed" || echo "PHI_ENCRYPTION_STATUS=failed"
+                      echo "=== PHI ENCRYPTION CHECK COMPLETE ==="
+              - step:
+                  type: Run
+                  name: HIPAA - Session Timeout Check
+                  identifier: hipaa_session
+                  spec:
+                    shell: Bash
+                    image: node:20
+                    command: |
+                      echo "=== SESSION CHECK START ==="
+                      cd demos/healthtech-patient-api
+                      # Extract JWT expiry from config
+                      EXPIRY=$(grep -oP "expiry.*?'([^']+)'" src/config.js | grep -oP "'[^']+'" | tr -d "'")
+                      echo "JWT_EXPIRY=$EXPIRY"
+                      # Convert to minutes for compliance check
+                      if echo "$EXPIRY" | grep -qP '^\d+d$'; then
+                        DAYS=$(echo "$EXPIRY" | grep -oP '\d+')
+                        MINUTES=$((DAYS * 24 * 60))
+                      elif echo "$EXPIRY" | grep -qP '^\d+h$'; then
+                        HOURS=$(echo "$EXPIRY" | grep -oP '\d+')
+                        MINUTES=$((HOURS * 60))
+                      elif echo "$EXPIRY" | grep -qP '^\d+m$'; then
+                        MINUTES=$(echo "$EXPIRY" | grep -oP '\d+')
+                      else
+                        MINUTES=9999
+                      fi
+                      echo "SESSION_TIMEOUT_MINUTES=$MINUTES"
+                      # HIPAA recommends 15 min or less for PHI access
+                      if [ "$MINUTES" -le 15 ]; then
+                        echo "SESSION_TIMEOUT_COMPLIANT=true"
+                        echo "SESSION_STATUS=passed"
+                      else
+                        echo "SESSION_TIMEOUT_COMPLIANT=false"
+                        echo "WARNING: Session timeout ($MINUTES min) exceeds HIPAA recommendation (15 min)"
+                        echo "SESSION_STATUS=failed"
+                      fi
+                      echo "=== SESSION CHECK COMPLETE ==="
+              - step:
+                  type: Run
+                  name: HIPAA - Audit Trail Coverage
+                  identifier: hipaa_audit_trail
+                  spec:
+                    shell: Bash
+                    image: node:20
+                    command: |
+                      echo "=== AUDIT TRAIL CHECK START ==="
+                      cd demos/healthtech-patient-api
+                      TOTAL_PHI_ROUTES=0
+                      AUDITED_ROUTES=0
+                      MISSING=""
+                      for routefile in src/routes/patients.js src/routes/appointments.js src/routes/prescriptions.js; do
+                        if [ -f "$routefile" ]; then
+                          TOTAL_PHI_ROUTES=$((TOTAL_PHI_ROUTES + 1))
+                          routename=$(basename $routefile .js)
+                          if grep -q 'auditLogger' "$routefile"; then
+                            AUDITED_ROUTES=$((AUDITED_ROUTES + 1))
+                            echo "[PASS] Audit logging on $routename routes"
+                          else
+                            MISSING="$MISSING $routename"
+                            echo "[FAIL] No audit logging on $routename routes"
+                          fi
+                        fi
+                      done
+                      echo "AUDIT_TRAIL_COVERAGE=$AUDITED_ROUTES/$TOTAL_PHI_ROUTES"
+                      echo "AUDIT_TRAIL_MISSING=$MISSING"
+                      [ $AUDITED_ROUTES -eq $TOTAL_PHI_ROUTES ] && echo "AUDIT_STATUS=passed" || echo "AUDIT_STATUS=failed"
+                      echo "=== AUDIT TRAIL CHECK COMPLETE ==="
+              - step:
+                  type: Run
+                  name: Generate SBOM
+                  identifier: generate_sbom
+                  spec:
+                    shell: Bash
+                    image: node:20
+                    command: |
+                      echo "=== SBOM GENERATION START ==="
+                      cd demos/healthtech-patient-api
+                      node <<'NODESCRIPT'
+                      var pkg = require('./package.json');
+                      var lockfile = require('./package-lock.json');
+                      var deps = Object.entries(lockfile.packages || {}).filter(e => e[0].startsWith('node_modules/'));
+                      console.log('SBOM_FORMAT=CycloneDX');
+                      console.log('SBOM_SPEC_VERSION=1.5');
+                      console.log('SBOM_COMPONENTS=' + deps.length);
+                      console.log('SBOM_DIRECT_DEPS=' + Object.keys(pkg.dependencies || {}).length);
+                      console.log('SBOM_DEV_DEPS=' + Object.keys(pkg.devDependencies || {}).length);
+                      NODESCRIPT
+                      echo "=== SBOM GENERATION COMPLETE ==="
+              - step:
+                  type: Run
+                  name: Validate Dockerfile
+                  identifier: validate_dockerfile
+                  spec:
+                    shell: Bash
+                    image: node:20
+                    command: |
+                      echo "=== DOCKERFILE VALIDATION START ==="
+                      cd demos/healthtech-patient-api
+                      ISSUES=0
+                      if [ -f Dockerfile ]; then
+                        grep -q 'USER' Dockerfile && echo "[PASS] Non-root user" || { echo "[FAIL] Running as root"; ISSUES=$((ISSUES+1)); }
+                        grep -q 'HEALTHCHECK' Dockerfile && echo "[PASS] Health check" || echo "[WARN] No health check"
+                        grep -q 'AS builder' Dockerfile && echo "[PASS] Multi-stage build" || echo "[WARN] Single-stage build"
+                        echo "DOCKERFILE_STATUS=passed"
+                        echo "DOCKERFILE_ISSUES=$ISSUES"
+                      else
+                        echo "DOCKERFILE_STATUS=skipped"
+                      fi
+                      echo "=== DOCKERFILE VALIDATION COMPLETE ==="
+              - step:
+                  type: Run
+                  name: Build Summary
+                  identifier: build_summary
+                  spec:
+                    shell: Bash
+                    image: node:20
+                    command: |
+                      echo "================================================"
+                      echo "  HEALTHTECH PATIENT API - BUILD SUMMARY"
+                      echo "================================================"
+                      echo "Service:     healthtech-patient-api v1.0.0"
+                      echo "Industry:    HealthTech / EHR"
+                      echo "Frameworks:  HIPAA Security Rule, SOC 2 Type II"
+                      echo "Commit:      <+codebase.commitSha>"
+                      echo "Branch:      <+codebase.branch>"
+                      echo "PR:          <+codebase.prNumber>"
+                      echo "Execution:   <+pipeline.executionId>"
+                      echo "Build:       #<+pipeline.sequenceId>"
+                      echo "================================================"

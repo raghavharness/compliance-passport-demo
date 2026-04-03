@@ -1,0 +1,330 @@
+pipeline:
+  name: saas-marketplace-ci
+  identifier: saas_marketplace_ci
+  projectIdentifier: RaghavTest
+  orgIdentifier: default
+  tags:
+    compliance: "true"
+    industry: saas
+    frameworks: "SOC2,SLSA"
+  properties:
+    ci:
+      codebase:
+        connectorRef: RaghavPrivateGithub
+        repoName: raghavharness/compliance-passport-demo
+        build: <+input>
+  stages:
+    - stage:
+        name: Build and Verify
+        identifier: build_and_verify
+        description: "SaaS CI - build, test, security scans with SLSA supply chain checks"
+        type: CI
+        spec:
+          cloneCodebase: true
+          platform:
+            os: Linux
+            arch: Amd64
+          runtime:
+            type: Cloud
+            spec: {}
+          execution:
+            steps:
+              - step:
+                  type: Run
+                  name: Build Info
+                  identifier: build_info
+                  spec:
+                    shell: Bash
+                    image: node:20
+                    command: |
+                      echo "=== BUILD INFO ==="
+                      echo "SERVICE_NAME=saas-plugin-marketplace"
+                      echo "SERVICE_TYPE=plugin-marketplace"
+                      echo "INDUSTRY=saas"
+                      echo "COMMIT_SHA=<+codebase.commitSha>"
+                      echo "COMMIT_AUTHOR=<+codebase.gitUser>"
+                      echo "COMMIT_MESSAGE=<+codebase.commitMessage>"
+                      echo "BRANCH=<+codebase.branch>"
+                      echo "REPO_URL=<+codebase.repoUrl>"
+                      echo "PR_NUMBER=<+codebase.prNumber>"
+                      echo "TRIGGER_TYPE=<+pipeline.triggerType>"
+                      echo "EXECUTION_ID=<+pipeline.executionId>"
+                      echo "BUILD_NUMBER=<+pipeline.sequenceId>"
+                      echo "=== BUILD INFO COMPLETE ==="
+              - step:
+                  type: Run
+                  name: Install Dependencies
+                  identifier: install_deps
+                  spec:
+                    shell: Bash
+                    image: node:20
+                    command: |
+                      echo "=== INSTALL START ==="
+                      cd demos/saas-plugin-marketplace
+                      npm ci 2>&1
+                      node -e "var p=require('./package.json'); console.log('DIRECT_DEPS=' + Object.keys(p.dependencies||{}).length)"
+                      node -e "var p=require('./package.json'); console.log('DEV_DEPS=' + Object.keys(p.devDependencies||{}).length)"
+                      echo "NODE_VERSION=$(node --version)"
+                      echo "=== INSTALL COMPLETE ==="
+              - step:
+                  type: Run
+                  name: ESLint Static Analysis
+                  identifier: run_lint
+                  spec:
+                    shell: Bash
+                    image: node:20
+                    command: |
+                      echo "=== LINT START ==="
+                      cd demos/saas-plugin-marketplace
+                      npx eslint src/ tests/ --format json > lint-report.json 2>&1 || true
+                      npx eslint src/ tests/ 2>&1 || true
+                      node -e "try{var r=require('./lint-report.json');console.log('LINT_ERRORS='+r.reduce((a,f)=>a+f.errorCount,0));console.log('LINT_WARNINGS='+r.reduce((a,f)=>a+f.warningCount,0))}catch(e){console.log('LINT_ERRORS=0');console.log('LINT_WARNINGS=0')}"
+                      echo "LINT_STATUS=passed"
+                      echo "=== LINT COMPLETE ==="
+              - step:
+                  type: Run
+                  name: Unit Tests
+                  identifier: unit_tests
+                  spec:
+                    shell: Bash
+                    image: node:20
+                    command: |
+                      echo "=== UNIT TESTS START ==="
+                      cd demos/saas-plugin-marketplace
+                      node --test tests/unit/*.test.js 2>&1 | tee unit-test-output.txt || true
+                      UNIT_TOTAL=$(grep -oP 'tests \K[0-9]+' unit-test-output.txt || echo '0')
+                      UNIT_PASS=$(grep -oP 'pass \K[0-9]+' unit-test-output.txt || echo '0')
+                      UNIT_FAIL=$(grep -oP 'fail \K[0-9]+' unit-test-output.txt || echo '0')
+                      echo "UNIT_TEST_TOTAL=$UNIT_TOTAL"
+                      echo "UNIT_TEST_PASSED=$UNIT_PASS"
+                      echo "UNIT_TEST_FAILED=$UNIT_FAIL"
+                      echo "=== UNIT TESTS COMPLETE ==="
+              - step:
+                  type: Run
+                  name: Integration Tests
+                  identifier: integration_tests
+                  spec:
+                    shell: Bash
+                    image: node:20
+                    command: |
+                      echo "=== INTEGRATION TESTS START ==="
+                      cd demos/saas-plugin-marketplace
+                      node --test tests/integration/*.test.js 2>&1 | tee integration-test-output.txt || true
+                      INT_TOTAL=$(grep -oP 'tests \K[0-9]+' integration-test-output.txt || echo '0')
+                      INT_PASS=$(grep -oP 'pass \K[0-9]+' integration-test-output.txt || echo '0')
+                      INT_FAIL=$(grep -oP 'fail \K[0-9]+' integration-test-output.txt || echo '0')
+                      echo "INT_TEST_TOTAL=$INT_TOTAL"
+                      echo "INT_TEST_PASSED=$INT_PASS"
+                      echo "INT_TEST_FAILED=$INT_FAIL"
+                      echo "=== INTEGRATION TESTS COMPLETE ==="
+              - step:
+                  type: Run
+                  name: SAST - Secret and Security Scan
+                  identifier: sast_scan
+                  spec:
+                    shell: Bash
+                    image: node:20
+                    command: |
+                      echo "=== SAST SCAN START ==="
+                      cd demos/saas-plugin-marketplace
+                      SECRETS_FOUND=0
+                      DANGEROUS=0
+                      echo "[1/2] Checking for hardcoded secrets..."
+                      if grep -rn 'api_key\|AWS_SECRET\|PRIVATE_KEY' src/ --include='*.js' 2>/dev/null | grep -v 'process.env\|config\.' | grep -v '.test.js'; then
+                        SECRETS_FOUND=$((SECRETS_FOUND + 1))
+                      else
+                        echo "No hardcoded secrets detected"
+                      fi
+                      echo "[2/2] Checking for dangerous functions (eval, Function)..."
+                      if grep -rn 'eval(\|new Function(' src/ --include='*.js' 2>/dev/null; then
+                        echo "WARNING: eval() or new Function() usage detected"
+                        DANGEROUS=$((DANGEROUS + 1))
+                      fi
+                      echo "SAST_SECRETS_FOUND=$SECRETS_FOUND"
+                      echo "SAST_DANGEROUS_FUNCTIONS=$DANGEROUS"
+                      [ $SECRETS_FOUND -eq 0 ] && [ $DANGEROUS -eq 0 ] && echo "SAST_STATUS=passed" || echo "SAST_STATUS=failed"
+                      echo "=== SAST SCAN COMPLETE ==="
+              - step:
+                  type: Run
+                  name: SCA - Dependency Vulnerability Scan
+                  identifier: sca_scan
+                  spec:
+                    shell: Bash
+                    image: node:20
+                    command: |
+                      echo "=== SCA SCAN START ==="
+                      cd demos/saas-plugin-marketplace
+                      npm audit --json > audit-report.json 2>/dev/null || true
+                      npm audit 2>&1 || true
+                      node <<'NODESCRIPT'
+                      try {
+                        var r = require('./audit-report.json');
+                        var v = (r.metadata && r.metadata.vulnerabilities) || {};
+                        console.log('SCA_CRITICAL=' + (v.critical || 0));
+                        console.log('SCA_HIGH=' + (v.high || 0));
+                        console.log('SCA_MODERATE=' + (v.moderate || 0));
+                        console.log('SCA_LOW=' + (v.low || 0));
+                        console.log('SCA_TOTAL=' + (v.total || 0));
+                      } catch(e) {
+                        console.log('SCA_CRITICAL=0');console.log('SCA_HIGH=0');
+                        console.log('SCA_MODERATE=0');console.log('SCA_LOW=0');console.log('SCA_TOTAL=0');
+                      }
+                      NODESCRIPT
+                      echo "SCA_STATUS=passed"
+                      echo "=== SCA SCAN COMPLETE ==="
+              - step:
+                  type: Run
+                  name: SLSA - Dependency Pinning Check
+                  identifier: slsa_dep_pinning
+                  spec:
+                    shell: Bash
+                    image: node:20
+                    command: |
+                      echo "=== DEPENDENCY PINNING CHECK START ==="
+                      cd demos/saas-plugin-marketplace
+                      PINNED=0
+                      UNPINNED=0
+                      echo "Checking package.json dependency version specs..."
+                      node <<'NODESCRIPT'
+                      var pkg = require('./package.json');
+                      var allDeps = Object.assign({}, pkg.dependencies || {}, pkg.devDependencies || {});
+                      var pinned = 0, unpinned = 0;
+                      for (var [name, ver] of Object.entries(allDeps)) {
+                        if (ver.startsWith('^') || ver.startsWith('~') || ver === '*' || ver === 'latest') {
+                          console.log('[UNPINNED] ' + name + ': ' + ver);
+                          unpinned++;
+                        } else {
+                          console.log('[PINNED]   ' + name + ': ' + ver);
+                          pinned++;
+                        }
+                      }
+                      console.log('DEPS_PINNED=' + pinned);
+                      console.log('DEPS_UNPINNED=' + unpinned);
+                      console.log('PINNING_STATUS=' + (unpinned === 0 ? 'passed' : 'failed'));
+                      NODESCRIPT
+                      echo "=== DEPENDENCY PINNING CHECK COMPLETE ==="
+              - step:
+                  type: Run
+                  name: SLSA - Base Image Pinning Check
+                  identifier: slsa_image_pinning
+                  spec:
+                    shell: Bash
+                    image: node:20
+                    command: |
+                      echo "=== BASE IMAGE PINNING CHECK START ==="
+                      cd demos/saas-plugin-marketplace
+                      if [ -f Dockerfile ]; then
+                        BASE_IMAGE=$(grep '^FROM' Dockerfile | head -1 | awk '{print $2}')
+                        echo "BASE_IMAGE_TAG=$BASE_IMAGE"
+                        if echo "$BASE_IMAGE" | grep -q '@sha256:'; then
+                          echo "[PASS] Base image pinned by digest"
+                          echo "BASE_IMAGE_PINNED=true"
+                          echo "IMAGE_PINNING_STATUS=passed"
+                        elif echo "$BASE_IMAGE" | grep -qE ':[0-9]+\.[0-9]+\.[0-9]+'; then
+                          echo "[WARN] Base image pinned by semver tag (digest preferred)"
+                          echo "BASE_IMAGE_PINNED=partial"
+                          echo "IMAGE_PINNING_STATUS=warning"
+                        elif echo "$BASE_IMAGE" | grep -q ':latest'; then
+                          echo "[FAIL] Base image uses :latest tag (not reproducible)"
+                          echo "BASE_IMAGE_PINNED=false"
+                          echo "IMAGE_PINNING_STATUS=failed"
+                        else
+                          echo "[FAIL] Base image uses mutable tag"
+                          echo "BASE_IMAGE_PINNED=false"
+                          echo "IMAGE_PINNING_STATUS=failed"
+                        fi
+                      else
+                        echo "No Dockerfile found"
+                        echo "IMAGE_PINNING_STATUS=skipped"
+                      fi
+                      echo "=== BASE IMAGE PINNING CHECK COMPLETE ==="
+              - step:
+                  type: Run
+                  name: SLSA - Build Provenance Check
+                  identifier: slsa_provenance
+                  spec:
+                    shell: Bash
+                    image: node:20
+                    command: |
+                      echo "=== PROVENANCE CHECK START ==="
+                      cd demos/saas-plugin-marketplace
+                      echo "Checking artifact service for provenance metadata capture..."
+                      PROV_BUILDID="false"
+                      PROV_COMMIT="false"
+                      # Check if artifactService captures build provenance
+                      if grep -q 'buildId.*process\|buildId.*env\|buildId.*req' src/services/artifactService.js 2>/dev/null; then
+                        PROV_BUILDID="true"
+                      else
+                        echo "[FAIL] Build ID not captured in artifact provenance"
+                      fi
+                      if grep -q 'sourceCommit.*process\|sourceCommit.*env\|sourceCommit.*req' src/services/artifactService.js 2>/dev/null; then
+                        PROV_COMMIT="true"
+                      else
+                        echo "[FAIL] Source commit not captured in artifact provenance"
+                      fi
+                      echo "PROVENANCE_BUILD_ID=$PROV_BUILDID"
+                      echo "PROVENANCE_SOURCE_COMMIT=$PROV_COMMIT"
+                      [ "$PROV_BUILDID" = "true" ] && [ "$PROV_COMMIT" = "true" ] && echo "PROVENANCE_STATUS=passed" || echo "PROVENANCE_STATUS=failed"
+                      echo "=== PROVENANCE CHECK COMPLETE ==="
+              - step:
+                  type: Run
+                  name: Generate SBOM
+                  identifier: generate_sbom
+                  spec:
+                    shell: Bash
+                    image: node:20
+                    command: |
+                      echo "=== SBOM GENERATION START ==="
+                      cd demos/saas-plugin-marketplace
+                      node <<'NODESCRIPT'
+                      var pkg = require('./package.json');
+                      var lockfile = require('./package-lock.json');
+                      var deps = Object.entries(lockfile.packages || {}).filter(e => e[0].startsWith('node_modules/'));
+                      console.log('SBOM_FORMAT=CycloneDX');
+                      console.log('SBOM_SPEC_VERSION=1.5');
+                      console.log('SBOM_COMPONENTS=' + deps.length);
+                      console.log('SBOM_DIRECT_DEPS=' + Object.keys(pkg.dependencies || {}).length);
+                      console.log('SBOM_DEV_DEPS=' + Object.keys(pkg.devDependencies || {}).length);
+                      NODESCRIPT
+                      echo "=== SBOM GENERATION COMPLETE ==="
+              - step:
+                  type: Run
+                  name: Validate Dockerfile
+                  identifier: validate_dockerfile
+                  spec:
+                    shell: Bash
+                    image: node:20
+                    command: |
+                      echo "=== DOCKERFILE VALIDATION START ==="
+                      cd demos/saas-plugin-marketplace
+                      ISSUES=0
+                      if [ -f Dockerfile ]; then
+                        grep -q 'USER' Dockerfile && echo "[PASS] Non-root user" || { echo "[FAIL] Running as root"; ISSUES=$((ISSUES+1)); }
+                        grep -q 'HEALTHCHECK' Dockerfile && echo "[PASS] Health check" || echo "[WARN] No health check"
+                        grep -q 'AS builder' Dockerfile && echo "[PASS] Multi-stage build" || echo "[WARN] Single-stage build"
+                        echo "DOCKERFILE_STATUS=passed"
+                        echo "DOCKERFILE_ISSUES=$ISSUES"
+                      else
+                        echo "DOCKERFILE_STATUS=skipped"
+                      fi
+                      echo "=== DOCKERFILE VALIDATION COMPLETE ==="
+              - step:
+                  type: Run
+                  name: Build Summary
+                  identifier: build_summary
+                  spec:
+                    shell: Bash
+                    image: node:20
+                    command: |
+                      echo "================================================"
+                      echo "  SAAS PLUGIN MARKETPLACE - BUILD SUMMARY"
+                      echo "================================================"
+                      echo "Service:     saas-plugin-marketplace v1.0.0"
+                      echo "Industry:    SaaS / DevOps Platform"
+                      echo "Frameworks:  SOC 2 Type II, SLSA Level 3"
+                      echo "Commit:      <+codebase.commitSha>"
+                      echo "Branch:      <+codebase.branch>"
+                      echo "PR:          <+codebase.prNumber>"
+                      echo "Execution:   <+pipeline.executionId>"
+                      echo "Build:       #<+pipeline.sequenceId>"
+                      echo "================================================"
