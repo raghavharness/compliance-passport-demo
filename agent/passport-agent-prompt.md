@@ -39,11 +39,60 @@ Collect ALL evidence first, regardless of which frameworks are requested. The sa
 often maps to multiple frameworks.
 
 ### 1.1 Pipeline Execution Data
-- Use `harness_get(resource_type=execution, resource_id=$EXECUTION_ID)` to get execution summary
-- Extract: status, trigger type, start/end times, stage results, triggered by
+- Use `harness_get(resource_type=execution, resource_id=$HARNESS_EXECUTION_ID, params={pipeline_id: $HARNESS_PIPELINE_ID})` to get execution summary
+- **Important**: The `pipeline_id` param is required — omitting it will fail
+- Extract: status, trigger type, start/end times, `runSequence` (build number), stage results, triggered by
 
 ### 1.2 Step Log Analysis
-- Use `harness_get(resource_type=execution_log)` for each completed step
+
+Fetching step logs requires a **two-step process**:
+
+#### Step A: Get the execution graph to discover step metadata
+```
+harness_get(
+  resource_type=execution,
+  resource_id=$HARNESS_EXECUTION_ID,
+  project_id=$HARNESS_PROJECT_ID,
+  org_id=$HARNESS_ORG_ID,
+  params={ pipeline_id: $HARNESS_PIPELINE_ID }
+)
+```
+From the response, extract:
+- `pipelineExecutionSummary.runSequence` → the build number (e.g. `7`)
+- `pipelineExecutionSummary.layoutNodeMap` → stage node IDs and identifiers
+
+#### Step B: Fetch each step's logs using the full logBaseKey as resource_id
+
+**CRITICAL**: Do NOT pass the execution ID as `resource_id` with `logBaseKey` in `params`.
+This will fail with HTTP 400. Instead, pass the **full logBaseKey path as the `resource_id`**.
+
+The logBaseKey pattern is:
+```
+{accountId}/pipeline/{pipelineId}/{runSequence}/-{executionId}/{stageId}/{stepId}
+```
+
+Example call:
+```
+harness_get(
+  resource_type=execution_log,
+  resource_id="9UuUfLwaQ-6ZowvbG7qtLQ/pipeline/fintech_payment_ci/7/-O3nA9fIYT2-Hw_ZJIy0tdw/build_and_verify/sast_scan",
+  project_id=$HARNESS_PROJECT_ID,
+  org_id=$HARNESS_ORG_ID
+)
+```
+
+Where:
+- `{accountId}` = `$HARNESS_ACCOUNT_ID`
+- `{pipelineId}` = `$HARNESS_PIPELINE_ID`
+- `{runSequence}` = build number from Step A (e.g. `7`)
+- `{executionId}` = `$HARNESS_EXECUTION_ID`
+- `{stageId}` = stage identifier from pipeline (e.g. `build_and_verify`)
+- `{stepId}` = step identifier (e.g. `sast_scan`, `unit_tests`, `pci_data_scan`)
+
+**Note**: The execution ID in the path is prefixed with a dash: `/-{executionId}/`
+
+#### Step C: Parse KEY=VALUE pairs from each step's log output
+
 - Parse structured output from step logs (steps emit KEY=VALUE pairs):
 
 **Common Steps (all pipelines):**
@@ -260,3 +309,52 @@ If `COMPLIANCE_FRAMEWORKS` is not set, the agent can auto-detect likely framewor
 
 However, the agent should ONLY evaluate frameworks explicitly listed in `COMPLIANCE_FRAMEWORKS`.
 Auto-detection is for advisory messaging only.
+
+---
+
+## Common Pitfalls & Troubleshooting
+
+### Fetching execution logs
+
+| Mistake | Result | Correct Approach |
+|---------|--------|-----------------|
+| `harness_get(resource_type=execution_log, resource_id=EXECUTION_ID, params={logBaseKey: ...})` | HTTP 400 "operation not permitted for prefix" | Pass the **full logBaseKey as `resource_id`** directly, with no `params.logBaseKey` |
+| Omitting the dash before execution ID in logBaseKey | Empty/wrong logs | The path segment is `/-{executionId}/` (note the leading dash) |
+| Using wrong `runSequence` | Logs not found | Always fetch `runSequence` from the execution summary first — do not assume it equals 1 |
+| Fetching logs for steps that didn't run | Empty results | Check the execution graph `layoutNodeMap` to see which stages/steps actually executed |
+
+### Constructing the logBaseKey
+
+The full pattern: `{accountId}/pipeline/{pipelineId}/{runSequence}/-{executionId}/{stageId}/{stepId}`
+
+- `accountId`: from `$HARNESS_ACCOUNT_ID` env var
+- `pipelineId`: the pipeline **identifier** (e.g. `fintech_payment_ci`), not the display name
+- `runSequence`: the integer build number from `pipelineExecutionSummary.runSequence`
+- `executionId`: from `$HARNESS_EXECUTION_ID` env var
+- `stageId`: the stage **identifier** (e.g. `build_and_verify`)
+- `stepId`: the step **identifier** (e.g. `sast_scan`, `unit_tests`, `pci_data_scan`)
+
+### Step identifiers by pipeline type
+
+**Common steps (all pipelines):** `build_info`, `install_deps`, `run_lint`, `unit_tests`, `integration_tests`, `sast_scan`, `sca_scan`, `generate_sbom`, `validate_dockerfile`, `build_summary`
+
+**FinTech (PCI DSS) additional:** `pci_data_scan`, `pci_audit_log`, `pci_rate_limit`
+
+**HealthTech (HIPAA) additional:** `hipaa_phi_scan`, `hipaa_encryption`, `hipaa_session`, `hipaa_audit_trail`
+
+**SaaS (SLSA) additional:** `slsa_dep_pinning`, `slsa_image_pinning`, `slsa_provenance`
+
+### Parsing KEY=VALUE from logs
+
+Step logs contain timestamped lines. Filter for lines containing `=` after the `info:` prefix. Examples:
+```
+[2026-04-04T11:05:32.178Z] info: SAST_STATUS=failed
+[2026-04-04T11:05:32.179Z] info: SAST_SECRETS_FOUND=1
+```
+Extract the value after the `=` sign. Ignore lines that are commands being echoed (these appear before `info: ===` markers) — only parse values between `=== STEP START ===` and `=== STEP COMPLETE ===` markers.
+
+### Report generation
+
+- Always cite which step and KEY=VALUE produced each finding
+- Include the actual file paths and line numbers from SAST/HIPAA/PCI scan output when available (these appear in the grep output lines in the logs)
+- For failed unit tests, extract the test name and assertion error from the TAP output in the unit_tests step log
